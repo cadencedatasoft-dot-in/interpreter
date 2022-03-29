@@ -20,7 +20,20 @@ fn main() {
     "ADD",
     "READ_VAR y",
     "MULTIPLY",
-    "RETURN_VALUE"];
+    "RETURN_VALUE",
+
+    "LOAD_VAL 1", 
+    "WRITE_VAR y",    
+    "LOAD_VAL 1",
+    "WRITE_VAR z", 
+
+    "LOOPW_START myid z", //LOOP_START <ID> <BOOL>, this is a while loop 
+    "READ_VAR y",
+    "LOAD_VAL 1",
+    "ADD",
+    "WRITE_VAR y",
+    "LOOPW_END myid", //LOOP_END <ID> //Should match with START
+    "EXIT"];
 
     //Instruction set holds instruction & operand count
     let mut inst_set = HashMap::new();
@@ -41,17 +54,25 @@ fn main() {
     }
 }
 
-pub fn execute_prog(prog_mem: Vec<(&str, Operands)>, inst_set: & HashMap<String, i8>) -> bool{
+pub fn execute_prog<'a>(prog_mem: Vec<(&str, Operands)>, inst_set: & HashMap<String, i8>) -> bool{
     let mut retval = true;
 
     let mut data_mem: VecDeque<i64> = VecDeque::with_capacity(STACK_MAX);
     let mut vars = HashMap::new();
 
-    for inst in prog_mem {
+    //for inst in prog_mem {
+    let mut jmp_offset: i32 = 0;
+    let mut i: i32 = -1;
+    //for mut i in 0..prog_mem.len() {    
+    loop {
+        i += 1;
+        i = (i + jmp_offset);
+        jmp_offset = 0;
+        let inst = prog_mem.get(i as usize).unwrap();
         let instruction = inst.0;
         match instruction {
             "LOAD_VAL" => {
-                let opd1 = inst.1.opdval1.unwrap();
+                let opd1 = (&inst).1.opdval1.unwrap();
                 if (data_mem.len() + 1) <  STACK_MAX {
                     data_mem.push_back(opd1);
                 }else{
@@ -61,12 +82,25 @@ pub fn execute_prog(prog_mem: Vec<(&str, Operands)>, inst_set: & HashMap<String,
                 }
             },
             "WRITE_VAR" => {
-                let opd1 = inst.1.opdname1.unwrap();
-                let curr_top: i32 = (data_mem.len() - 1) as i32;
-                //Are we allowing ubnlimited variables?
-                vars.insert(opd1, curr_top); //this is where value to opd1 resides
+                let opd1 = inst.1.opdname1.as_ref().unwrap();
+                let val_idx = match vars.get(opd1){
+                    Some(v) => *v,
+                    None => {
+                        //New variable, not already declared
+                        let curr_top: i32 = (data_mem.len() - 1) as i32;
+                        vars.insert(opd1, curr_top);  //Value for variable resides here. Are we allowing unlimited variables? 
+                        continue;
+                    }
+                };
+
+                if val_idx <= data_mem.len() as i32 {
+                    let lastval = data_mem.pop_back().unwrap();
+                    if let Some(elem) = data_mem.get_mut((val_idx) as usize) {
+                        *elem = lastval;
+                    }
+                }               
             },
-            "READ_VAR"  => {
+            "READ_VAR" => {
                 let opd1 = inst.1.opdname1.as_ref().unwrap();
                 let val_idx = vars.get(opd1).unwrap();
                 if *val_idx <= data_mem.len() as i32 {
@@ -140,8 +174,61 @@ pub fn execute_prog(prog_mem: Vec<(&str, Operands)>, inst_set: & HashMap<String,
                     println!("Stack underflow");
                     retval = false;
                     break;
-                }                    
+                }                 
             },
+            "LOOPW_START" => {
+                //Get operand count for validation
+                let oprrnds_count = *inst_set.get(inst.0).unwrap();
+
+                //Retrive condition expression
+                let condition_var = inst.1.opdname2.clone().unwrap();
+
+                let cond_val = match should_loop(&condition_var, &vars, &data_mem){
+                    Some(v) => v,
+                    None => {
+                        println!("Unknown error");
+                        retval = false;
+                        break;
+                    }
+                };
+
+                //Evaluate condition expression
+                if cond_val == true {
+                    
+                    continue; 
+                }else{
+                //If NOT condition satisfied, start executing instruction after the LOOPW_END_
+                    let end_marker = inst.1.opdname1.clone().unwrap();
+
+                    let offset = match loopend_offset(&end_marker, &prog_mem, i){
+                        Some(v) => v,
+                        None => {
+                            println!("Unknown error");
+                            retval = false;
+                            break;                            
+                        }
+                    };
+                    //Add one because we are going to instruction after LOOPW_END
+                    jmp_offset = offset as i32 + 1 -1; //Substract one because PC in going to increment before it starts executing next instruction
+                }
+            },
+            "LOOPW_END" => {
+                let oprrnds_count = *inst_set.get(inst.0).unwrap();
+
+                let start_marker = inst.1.opdname1.clone().unwrap();
+                let os = match loopstart_offset(&start_marker, &prog_mem, i){
+                    Some(v) => v,
+                    None => {
+                        println!("Unknown error");
+                        retval = false;
+                        break;                            
+                    }
+                };
+                jmp_offset = -(os as i32 + 1); //Add one because PC in going to increment before it starts executing next instruction
+            },
+            "EXIT" => {
+                println!("Exiting program");
+            },                        
             _ => {
                 println!("Unknown instruction cannot process");
             }
@@ -151,8 +238,85 @@ pub fn execute_prog(prog_mem: Vec<(&str, Operands)>, inst_set: & HashMap<String,
     return retval;
 }
 
+fn should_loop(loop_var: &String, vars: &HashMap<&String, i32>, data_mem: &VecDeque<i64>) -> Option<bool> {
+    let mut retval = false;
+    let val_idx = *vars.get(&loop_var).unwrap();
 
-pub fn validate_and_load_prog<'a>(prog: &[&'a str;10], iset: & HashMap<String, i8>, programmemory: &mut Vec<(&'a str, Operands)>) -> bool{
+    if val_idx <= data_mem.len() as i32 {
+        let val = match data_mem.get(val_idx as usize) {
+            Some(v) => *v,
+            None => {
+                //data_mem.push_back(loop_var.clone())
+                return None;
+            }
+        };
+
+        if val > 0 {
+            retval = true;
+        }
+    }else{
+        println!("Variable is out of scope");
+    }
+
+    return Some(retval);
+}
+
+fn loopend_offset(end_marker: &String, prog_mem: &Vec<(&str, Operands)>, pc: i32) -> Option<i32> {
+    let mut loop_end = String::from("LOOPW_END ");
+
+    let offset = match prog_mem.iter().position(|x | {
+        let p1 = x.0;
+        let p2 = match &x.1.opdname1{
+            Some(v) => v,
+            None => return false
+        };
+
+        if p1.contains(&loop_end) {
+            if p2.contains(end_marker) {
+                return true
+            }
+        }
+
+        return false;
+    }){
+        Some(v) => v as i32,
+        None => {
+            return None;
+        }
+    };
+
+    return Some(offset as i32);
+}
+
+fn loopstart_offset(start_marker: &String, prog_mem: &Vec<(&str, Operands)>, pc: i32) -> Option<i32> {
+    let mut loop_end = String::from("LOOPW_START");
+
+    let offset = match prog_mem.iter().position(|x | {
+        let p1 = x.0;
+        let p2 = match &x.1.opdname1{
+            Some(v) => v,
+            None => return false
+        };
+
+        if p1.contains(&loop_end) {
+            if p2.contains(start_marker) {
+                return true
+            }
+        }
+
+        return false;
+    }){
+        Some(v) => pc-v as i32,
+        None => {
+            return None;
+        }
+    };
+
+    return Some(offset);
+}
+
+
+pub fn validate_and_load_prog<'a>(prog: &[&'a str;21], iset: & HashMap<String, i8>, programmemory: &mut Vec<(&'a str, Operands)>) -> bool{
     let mut retval = true;
     
     for inst in prog{
@@ -167,8 +331,10 @@ pub fn validate_and_load_prog<'a>(prog: &[&'a str;10], iset: & HashMap<String, i
             match mnem {
                 "LOAD_VAL" | 
                 "WRITE_VAR" |
-                "READ_VAR" => {
+                "READ_VAR" |
+                "LOOPW_END" => {
                     if toks.len() != 2 {
+                        println!("Invalid argument count");
                         retval = false;
                         break;
                     }else{
@@ -183,6 +349,9 @@ pub fn validate_and_load_prog<'a>(prog: &[&'a str;10], iset: & HashMap<String, i
                             "READ_VAR" => {
                                 programmemory.push((mnem, Operands{ opdval1: None, opdval2: None, opdname1: Some(toks[1].to_string()), opdname2: None}) );
                             },
+                            "LOOPW_END" => {
+                                programmemory.push((mnem, Operands{ opdval1: None, opdval2: None, opdname1: Some(toks[1].to_string()), opdname2: None}) );
+                            },                            
                             _ => {
                                 println!("Invalid arguments")
                             }
@@ -193,14 +362,33 @@ pub fn validate_and_load_prog<'a>(prog: &[&'a str;10], iset: & HashMap<String, i
                 "ADD" |
                 "SUBTRACT" |
                 "MULTIPLY" |
-                "DIVIDE" => {
+                "DIVIDE" |
+                "EXIT" => {
                     if toks.len() != 1 {
+                        println!("Invalid argument count");
                         retval = false;
                         break;
                     }else{
                         programmemory.push((mnem, Operands{ opdval1: None, opdval2: None, opdname1: None, opdname2: None}) );
                     }                    
                 },
+                "LOOPW_START" => {
+                    if toks.len() != 3 {
+                        println!("Invalid argument count");
+                        retval = false;
+                        break;
+                    }else{
+                        let id = toks[1].to_string();
+                        let mut end = String::from("LOOPW_END ");
+                        end.push_str(&id);
+
+                        if prog.contains(&end.as_str()) {
+                            programmemory.push((mnem, Operands{ opdval1: None, opdval2: None, opdname1: Some(toks[1].to_string()), opdname2: Some(toks[2].to_string())}) );
+                        }else{
+                            println!("Syntax error, LOOPW end not found");
+                        }
+                    }                    
+                },              
                 _ => {
                     println!("Invalid syntax")
                 }
@@ -221,6 +409,9 @@ pub fn init_inst_set(set: &mut HashMap<String, i8>){
     set.insert(String::from("DIVIDE"), 2);
     set.insert(String::from("MULTIPLY"), 2);    
     set.insert(String::from("RETURN_VALUE"), 1);
+    set.insert(String::from("LOOPW_START"), 2); 
+    set.insert(String::from("LOOPW_END"), 1);
+    set.insert(String::from("EXIT"), 0);
 }
 
 //For now unused code 
